@@ -1,120 +1,125 @@
-# A script to automatically take backups of the system and upload it to google drive as long as rclone is configured properly #
-# Written by chno
-# Created on: Fri Oct  4 01:06:56 PM EDT 2024
-# Last Updated: Mon Oct  7 03:06:48 PM EDT 2024
-# Last update: Fixed max number of retires as well as added additional error handling. 
+# Script used to create the backup
+# Written by CHNO
+# Creation Date: Wed Oct  9 10:32:38 AM EDT 2024
+# Last Updated: Wed Oct  9 02:20:28 PM EDT 2024
+# Last Update: Added additional logging as well as disabling the run backup button while a backup is running.
 
-### Imports ###
-import os
-import subprocess
-from datetime import datetime
-import time
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from backup import create_backup
+from cron_setup import set_anacron_job
 
-### Paths and configurations ###
-BACKUP_DIR = "/home/odoo"  # Backup home directory
-BACKUP_NAME = f"backup-{datetime.now().strftime('%Y-%m-%d')}.tar.gz"
-BACKUP_PATH = f"/tmp/{BACKUP_NAME}"
-LOG_FILE = f"/tmp/backup_log_{datetime.now().strftime('%Y-%m-%d')}.log"
+class BackupGUI:
+    def __init__(self, root):
+        root.title("Backup Utility")
 
-### Functions ###
+        # GUI components for selecting backup directory, rclone config, Google Drive, and schedule.
+        self.backup_dir_label = tk.Label(root, text="Backup Directory:")
+        self.backup_dir_label.pack()
+        self.backup_dir_entry = tk.Entry(root, width=50)
+        self.backup_dir_entry.pack()
+        self.backup_dir_button = tk.Button(root, text="Select Directory", command=self.select_backup_directory)
+        self.backup_dir_button.pack()
 
-def log_message(message):
-    """Log a message to the console and to the log file."""
-    with open(LOG_FILE, 'a') as log_file:
-        log_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}\n")
-    print(message)
+        # Rclone remote config
+        self.rclone_label = tk.Label(root, text="Rclone Remote Config:")
+        self.rclone_label.pack()
+        self.rclone_entry = tk.Entry(root, width=50)
+        self.rclone_entry.pack()
 
-def create_backup():
-    log_message(f"Creating backup: {BACKUP_NAME}")
+        # Set default Rclone config path
+        self.rclone_entry.insert(0, "gdrive:")
 
-    try:
-        # Exclude dynamically changing files like browser cache
-        exclude_paths = [
-            '--exclude=/home/odoo/.cache',
-            '--exclude=/home/odoo/.config/discord',
-            '--exclude=/home/odoo/.mozilla',
-            '--exclude=/home/odoo/.google-chrome'
-        ]
+        # Google Drive folder name
+        self.gdrive_label = tk.Label(root, text="Google Drive Folder Name:")
+        self.gdrive_label.pack()
+        self.gdrive_entry = tk.Entry(root, width=50)
+        self.gdrive_entry.pack()
 
-        # Add the exclude paths to the tar command
-        tar_command = ["tar", "-czvf", BACKUP_PATH] + exclude_paths + [BACKUP_DIR, "--ignore-failed-read"]
+        # Backup Schedule (Daily/Weekly)
+        self.schedule_label = tk.Label(root, text="Backup Schedule:")
+        self.schedule_label.pack()
 
-        # Run the tar command and capture both stdout and stderr
-        result = subprocess.run(
-            tar_command,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
-        )
+        self.schedule_var = tk.StringVar(value="daily")  # Default to daily
+        self.daily_radio = tk.Radiobutton(root, text="Daily", variable=self.schedule_var, value="daily")
+        self.weekly_radio = tk.Radiobutton(root, text="Weekly", variable=self.schedule_var, value="weekly")
 
-        # Log the tar output (list of backed-up files)
-        log_message(result.stdout)
+        self.daily_radio.pack()
+        self.weekly_radio.pack()
 
-        # Filter and display ignored files based on permission issues
-        ignored_files = [line for line in result.stderr.split('\n') if 'Cannot open' in line]
-        if ignored_files:
-            log_message("\nThe following files were ignored due to permission issues:")
-            for file in ignored_files:
-                log_message(file)
+        # Run Backup Button
+        self.submit_button = tk.Button(root, text="Run Backup", command=self.run_backup)
+        self.submit_button.pack()
 
-        log_message("Backup process completed successfully.")
+        # Set Anacron Job Button
+        self.anacron_button = tk.Button(root, text="Set Anacron Job", command=self.set_anacron_job)
+        self.anacron_button.pack()
 
-    except subprocess.CalledProcessError as e:
-        # Catch the CalledProcessError and handle it
-        log_message(f"Backup process failed with error:\n{e.stderr}")
-        
-        # Display ignored files or errors encountered
-        ignored_files = [line for line in e.stderr.split('\n') if 'Cannot open' in line]
-        if ignored_files:
-            log_message("\nThe following files were ignored due to permission issues:")
-            for file in ignored_files:
-                log_message(file)
+        # Status Label
+        self.status_label = tk.Label(root, text="", fg="green")
+        self.status_label.pack()
 
-        log_message("Backup process encountered issues, but some files may still have been backed up.")
-    
-    except Exception as e:
-        # Catch any other unforeseen errors
-        log_message(f"An unexpected error occurred: {str(e)}")
-        raise
+        # Log output Text widget
+        self.log_output = tk.Text(root, width=60, height=15)
+        self.log_output.pack()
 
-def upload_to_google_drive():
-    log_message("Uploading backup to Google Drive...")
+    # Function to log messages in the Text Widget.
+    def log_message(self, message):
+        self.log_output.insert(tk.END, f"{message}\n")
+        self.log_output.see(tk.END)  # Automatically scroll to the latest message
+        print(message)
 
-    max_retries = 3
-    attempt = 0
-    error_message = None  # Initialize error_message in case retries are exhausted
+    def select_backup_directory(self):
+        """Function to select the backup directory."""
+        dir_path = filedialog.askdirectory()
+        self.backup_dir_entry.delete(0, tk.END)
+        self.backup_dir_entry.insert(0, dir_path)
 
-    while attempt < max_retries:
+    def run_backup(self):
+        """Function to create the backup."""
+        backup_dir = self.backup_dir_entry.get()
+        rclone_remote = self.rclone_entry.get()
+        gdrive_folder = self.gdrive_entry.get()
+
+        if not backup_dir or not rclone_remote or not gdrive_folder:
+            self.log_message("All fields are required.")
+            return
+
+        self.log_message("Starting backup...")
+
+        # Disable the "Run Backup" button to prevent multiple backups.
+        self.submit_button.config(state=tk.DISABLED)
+
+        # Run the backup in a new thread to avoid blocking the GUI
+        import threading
+        threading.Thread(target=lambda: self._run_backup_thread(backup_dir, rclone_remote, gdrive_folder)).start()
+
+    def _run_backup_thread(self, backup_dir, rclone_remote, gdrive_folder):
+        """Backup thread to avoid freezing the GUI."""
+
         try:
-            # Upload backup to Google Drive using rclone
-            subprocess.run(["rclone", "copy", BACKUP_PATH, "gdrive:/backups/"], check=True)
-            log_message("Backup uploaded to Google Drive successfully.")
-            return  # Exit the function after a successful upload
-    
-        except subprocess.CalledProcessError as e:
-            log_message(f"Failed to upload backup to Google Drive. Error: {e.stderr}")
-            error_message = str(e.stderr)  # Assign the last error message
-            
-            if "rateLimitExceeded" in e.stderr:
-                attempt += 1
-                log_message(f"Rate limit exceeded. Retrying {attempt}/{max_retries}...")
-                time.sleep(60)  # Wait for 60 seconds before retrying
+            if create_backup(backup_dir, rclone_remote, gdrive_folder, self.log_message):
+                self.log_message("Backup Complete!")
             else:
-                raise  # Raise the exception if necessary for further handling
+                self.log_message("Backup failed. Check the logs for details.")
+        except Exception as e:
+            self.log_message(f"An error occurred during the backup: {str(e)}")
+        finally:
+            # Re-enable the "Run Backup" button after the backup completes
+            self.submit_button.config(state=tk.NORMAL)
 
-    log_message(f"Failed to upload backup after multiple tries. Last error: {error_message}")
 
-def clean_up():
-    # Function to clean up the backup directory from the local machine #
-    try:
-        if os.path.exists(BACKUP_PATH):
-            os.remove(BACKUP_PATH)
-            log_message(f"Cleaned up local backup: {BACKUP_NAME}")
-    except Exception as e:
-        log_message(f"Error during cleanup: {str(e)}")
-        raise
+    def set_anacron_job(self):
+        """Function to set the anacron job."""
+        schedule = self.schedule_var.get()
+        command = "python3 /home/odoo/Odoo-Backup/main.py"
+        if set_anacron_job(schedule, command):
+            self.log_message("Anacron Job set successfully! You may have been prompted for your password.")
+        else:
+            self.log_message("Failed to set Anacron Job. Check if you have root permissions.")
+
 
 if __name__ == "__main__":
-    try: 
-        create_backup()
-        upload_to_google_drive()
-    finally:
-        clean_up()
+    root = tk.Tk()
+    gui = BackupGUI(root)
+    root.mainloop()
